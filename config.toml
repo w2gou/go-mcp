@@ -1,0 +1,93 @@
+# config.toml — MCP 客户端配置（基于 stdio）
+#
+# 说明：
+# - 本工程的 MCP 服务通过标准输入/输出（stdio）暴露（见 mcp/router/server.go），
+#   因此客户端需以“stdio”方式启动该服务进程并与之对话。
+# - 下方默认使用 `go run .` 启动，无需预构建二进制，便于开发调试。
+# - 若要在生产环境部署，建议先 `go build -o bin/go-mcp`，然后将 command 指向该二进制。
+# - 不同 MCP 客户端对 TOML 配置键名的约定可能略有差异；本文件采用通用且直观的键名，
+#   常见客户端（如支持 TOML 的通用 MCP 运行器）通常能直接识别；若你的客户端有专属格式，
+#   可参考本文件注释进行调整（如改为 JSON/配置项名不同等）。
+
+[client]
+# 可选：声明调用方信息（有些客户端会在 initialize 时上报）
+name = "local-dev"
+version = "0.1.0"
+
+[servers.go_mcp_example]
+# 传输方式：本服务为 stdio（通过 os.Stdin/os.Stdout）
+transport = "stdio"
+
+# 启动命令：开发模式用 go run .，在仓库根目录执行即可
+command = "go"
+args = ["run", "."]
+
+# 可选：工作目录（若客户端支持 cwd 配置且不能保证在仓库根运行时可填写）
+# cwd = "/mnt/f/project/dev/Go/go-mcp"
+
+# 可选：环境变量（按需添加）
+# env = { "LOG_LEVEL" = "info" }
+
+# --- 生产部署示例（建议二选一，按需启用） ---
+# [servers.go_mcp_example_prod]
+# transport = "stdio"
+# command = "./bin/go-mcp"   # 先执行：go build -o bin/go-mcp
+# args = []
+# # cwd = "/mnt/f/project/dev/Go/go-mcp"
+# # env = {}
+
+# ==========================
+# MCP 调用示例：查询 CPU 状态
+# ==========================
+#
+# 该服务遵循 JSON-RPC 2.0 与 MCP 协议（ProtocolVersion = 2024-06-24）。
+# 流程：initialize -> （可选）tools/list -> tools/call
+#
+# 1) 初始化（initialize）
+# {
+#   "jsonrpc": "2.0",
+#   "id": 1,
+#   "method": "initialize",
+#   "params": {
+#     "clientInfo": {"name": "local-dev", "version": "0.1.0"},
+#     "protocolVersion": "2024-06-24"
+#   }
+# }
+#
+# 2) （可选）列出工具（tools/list）
+# {
+#   "jsonrpc": "2.0",
+#   "id": 2,
+#   "method": "tools/list"
+# }
+# 响应中应包含名为 "cpu_status" 的工具。
+#
+# 3) 调用 CPU 工具（tools/call）
+# - cpu_status 不需要参数，可省略 arguments 字段，或传 {} / null
+#
+# 3.1 省略 arguments：
+# {
+#   "jsonrpc": "2.0",
+#   "id": 3,
+#   "method": "tools/call",
+#   "params": {"name": "cpu_status"}
+# }
+#
+# 3.2 传递空对象作为 arguments：
+# {
+#   "jsonrpc": "2.0",
+#   "id": 3,
+#   "method": "tools/call",
+#   "params": {"name": "cpu_status", "arguments": {}}
+# }
+#
+# 成功时响应示例（节选）：
+# {
+#   "jsonrpc": "2.0",
+#   "id": 3,
+#   "result": {
+#     "content": [
+#       {"type": "text", "text": "CPU cores: ...\nLoad average ...\nSampled utilization: ..."}
+#     ]
+#   }
+# }
