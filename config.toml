@@ -53,6 +53,7 @@ args = ["run", "."]
 #     "protocolVersion": "2024-06-24"
 #   }
 # }
+# {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "clientInfo": {"name": "local-dev", "version": "0.1.0"}, "protocolVersion": "2024-06-24" }}
 #
 # 2) （可选）列出工具（tools/list）
 # {
@@ -60,6 +61,7 @@ args = ["run", "."]
 #   "id": 2,
 #   "method": "tools/list"
 # }
+# {"jsonrpc": "2.0", "id": 2, "method": "tools/list" }
 # 响应中应包含名为 "cpu_status" 的工具。
 #
 # 3) 调用 CPU 工具（tools/call）
@@ -72,6 +74,7 @@ args = ["run", "."]
 #   "method": "tools/call",
 #   "params": {"name": "cpu_status"}
 # }
+# {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "cpu_status"} }
 #
 # 3.2 传递空对象作为 arguments：
 # {

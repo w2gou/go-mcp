@@ -4,14 +4,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"log"
-	"sync"
-
 	"go-mcp/mcp/tools"
 	"go-mcp/mcp/types"
+	"io"
+	"os"
 )
 
 // MethodHandler processes an incoming JSON-RPC request and returns a result or an error.
@@ -19,32 +16,20 @@ type MethodHandler func(ctx context.Context, req types.Request) (any, *types.Err
 
 // Server implements a stdio-based MCP server.
 type Server struct {
-	decoder     *json.Decoder
-	encoder     *json.Encoder
-	writer      *bufio.Writer
-	writerMutex sync.Mutex
+	input  io.Reader
+	output io.Writer
 
 	handlers  map[string]MethodHandler
-	tools     map[string]tools.Registration
+	tools     map[string]types.MonitorTool
 	toolOrder []string
 
-	logger *log.Logger
-	info   types.ServerInfo
+	info types.ServerInfo
 
 	initialized bool
 }
 
 // Option customises server behavior during construction.
 type Option func(*Server)
-
-// WithLogger configures the logger used by the server.
-func WithLogger(logger *log.Logger) Option {
-	return func(s *Server) {
-		if logger != nil {
-			s.logger = logger
-		}
-	}
-}
 
 // WithServerInfo overrides the default server info advertised during initialization.
 func WithServerInfo(name, version string) Option {
@@ -59,238 +44,251 @@ func WithServerInfo(name, version string) Option {
 }
 
 // NewServer 构建一个基于 stdio 的 MCP 服务器，并在初始化阶段绑定所有已注册工具。
-func NewServer(r io.Reader, w io.Writer, opts ...Option) (*Server, error) {
-	bufWriter := bufio.NewWriter(w)
-	srv := &Server{
-		decoder:   json.NewDecoder(r),
-		encoder:   json.NewEncoder(bufWriter),
-		writer:    bufWriter,
+func NewServer() *Server {
+	return &Server{
+		input:     os.Stdin,
+		output:    os.Stdout,
 		handlers:  map[string]MethodHandler{},
-		tools:     map[string]tools.Registration{},
+		tools:     make(map[string]types.MonitorTool),
 		toolOrder: make([]string, 0),
-		logger:    log.New(io.Discard, "", log.LstdFlags),
 		info: types.ServerInfo{
 			Name:    "go-mcp-server",
 			Version: "dev",
 		},
 	}
-
-	srv.decoder.UseNumber()
-	srv.encoder.SetEscapeHTML(false)
-
-	for _, opt := range opts {
-		opt(srv)
-	}
-
-	srv.registerBuiltins()
-
-	if err := srv.registerDefaultTools(); err != nil {
-		return nil, err
-	}
-
-	return srv, nil
 }
 
 // Run processes JSON-RPC messages until the input stream is closed or the context is cancelled.
-func (s *Server) Run(ctx context.Context) error {
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
+func (s *Server) Run() error {
+	if s.initialized {
+		return fmt.Errorf("路由器已经在运行")
+	}
 
-		var req types.Request
-		if err := s.decoder.Decode(&req); err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			return fmt.Errorf("decode request: %w", err)
-		}
+	// 启动 MCP 路由器，但不输出日志避免干扰 JSON-RPC
+	s.initialized = true
 
-		// Skip invalid protocol versions but respond with an error when possible.
-		if req.JSONRPC != "" && req.JSONRPC != types.JSONRPCVersion {
-			s.respondWithError(req, types.NewErrorf(types.CodeInvalidRequest, "expected jsonrpc version %s", types.JSONRPCVersion))
+	// 初始化工具
+	if err := s.InitializeTools(); err != nil {
+		return fmt.Errorf("初始化工具失败: %v", err)
+	}
+
+	// 启动消息处理循环
+	return s.dispatch()
+}
+
+// InitializeTools 初始化所有监控工具
+func (s *Server) InitializeTools() error {
+	// 初始化监控工具，但不输出日志避免干扰 JSON-RPC
+
+	// 创建工具实例
+	cpuTool := tools.NewCPUTool()
+
+	// 注册工具
+	s.tools[cpuTool.GetName()] = cpuTool
+
+	// 工具初始化完成，但不输出日志避免干扰 JSON-RPC
+
+	return nil
+}
+
+func (s *Server) dispatch() error {
+	scanner := bufio.NewScanner(s.input)
+	for s.initialized && scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
 			continue
 		}
 
-		s.dispatch(ctx, req)
+		// 解析 JSON-RPC 请求
+		var req types.Request
+		if err := json.Unmarshal([]byte(line), &req); err != nil {
+			// 解析失败，但不输出日志到避免干扰 JSON-RPC
+			// 发送解析错误响应（只有在有ID的情况下）
+			var rawMessage map[string]interface{}
+			json.Unmarshal([]byte(line), &rawMessage)
+			if id, hasID := rawMessage["id"]; hasID {
+				errorResp := &types.Response{
+					JSONRPC: "2.0",
+					ID:      id,
+					Error: &types.Error{
+						Code:    -32700,
+						Message: "Parse error: " + err.Error(),
+					},
+				}
+				s.writeResponse(errorResp)
+			}
+			continue
+		}
+
+		// 检查是否是通知（没有 ID 字段）
+		isNotification := req.ID == nil
+
+		// 处理请求
+		response := s.handleRequest(&req)
+
+		// 发送响应（只有非通知的请求才发送响应）
+		if response != nil && !isNotification {
+			s.writeResponse(response)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		// 扫描错误，但不输出到 stdout
+		return fmt.Errorf("扫描输入时出错: %v", err)
+	}
+
+	return nil
+}
+
+func (s *Server) handleRequest(req *types.Request) *types.Response {
+	switch req.Method {
+	case types.MethodInitialize:
+		return s.handleInitialize(req)
+	//case types.MethodInitialized, types.MethodNotificationInitialized:
+	//	return s.handleInitialized(req)
+	case types.MethodListTools:
+		return s.handleListTools(req)
+	case types.MethodCallTool:
+		return s.handleCallTool(req)
+	//case types.MethodListPrompts:
+	//	return s.handleListPrompts(req)
+	//case types.MethodListResources:
+	//	return s.handleListResources(req)
+	//case types.MethodReadResource:
+	//	return s.handleReadResource(req)
+	default:
+		return s.errorResponse(req, -32601, "Method not found: "+req.Method)
 	}
 }
 
-// RegisterTool adds a new tool definition and handler.
-func (s *Server) RegisterTool(def tools.ToolDefinition, handler tools.Handler) error {
-	registration, err := tools.NewRegistration(def, handler)
+// sendResponse 发送响应
+func (s *Server) writeResponse(response *types.Response) {
+	respBytes, err := json.Marshal(response)
 	if err != nil {
-		return err
-	}
-
-	name := registration.Definition.Name
-	if _, exists := s.tools[name]; exists {
-		return fmt.Errorf("tool %s already registered", name)
-	}
-
-	s.tools[name] = registration
-	s.toolOrder = append(s.toolOrder, name)
-	return nil
-}
-
-func (s *Server) dispatch(ctx context.Context, req types.Request) {
-	handler, ok := s.handlers[req.Method]
-	if !ok {
-		s.logger.Printf("unknown method: %s", req.Method)
-		s.respondWithError(req, types.NewErrorf(types.CodeMethodNotFound, "method %q not found", req.Method))
+		// 序列化失败，但不输出日志避免干扰 JSON-RPC
 		return
 	}
 
-	result, errObj := handler(ctx, req)
-
-	// Notifications do not carry an id and therefore do not expect a response.
-	if req.ID == nil {
-		return
-	}
-
-	resp := types.Response{
-		JSONRPC: types.JSONRPCVersion,
-		ID:      types.CloneID(req.ID),
-	}
-
-	if errObj != nil {
-		resp.Error = errObj
-	} else {
-		if result == nil {
-			resp.Result = struct{}{}
-		} else {
-			resp.Result = result
-		}
-	}
-
-	if err := s.writeResponse(resp); err != nil {
-		s.logger.Printf("failed to send response: %v", err)
+	if _, err := fmt.Fprintln(s.output, string(respBytes)); err != nil {
+		// 发送失败，但不输出日志避免干扰 JSON-RPC
 	}
 }
 
-func (s *Server) respondWithError(req types.Request, errObj *types.Error) {
-	if req.ID == nil {
-		s.logger.Printf("dropping error for notification %s: %s", req.Method, errObj.Message)
-		return
-	}
-
-	resp := types.Response{
-		JSONRPC: types.JSONRPCVersion,
-		ID:      types.CloneID(req.ID),
-		Error:   errObj,
-	}
-	if err := s.writeResponse(resp); err != nil {
-		s.logger.Printf("failed to send error response: %v", err)
-	}
-}
-
-func (s *Server) writeResponse(resp types.Response) error {
-	s.writerMutex.Lock()
-	defer s.writerMutex.Unlock()
-
-	if err := s.encoder.Encode(resp); err != nil {
-		return err
-	}
-	return s.writer.Flush()
-}
-
-func (s *Server) registerBuiltins() {
-	s.handlers["initialize"] = s.handleInitialize
-	s.handlers["ping"] = s.handlePing
-	s.handlers["tools/list"] = s.handleListTools
-	s.handlers["tools/call"] = s.handleCallTool
-}
-
-func (s *Server) registerDefaultTools() error {
-	for _, registration := range tools.Registered() {
-		if err := s.RegisterTool(registration.Definition, registration.Handler); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *Server) handleInitialize(_ context.Context, req types.Request) (any, *types.Error) {
-	var params types.InitializeParams
-	if len(req.Params) > 0 {
-		if err := types.DecodeParams(req.Params, &params); err != nil {
-			return nil, types.NewInvalidParamsError(err)
-		}
-	}
-
-	s.initialized = true
+// handleInitialize 处理初始化请求
+func (s *Server) handleInitialize(req *types.Request) *types.Response {
+	// 初始化服务器，但不输出日志避免干扰 JSON-RPC
 
 	result := types.InitializeResult{
-		ProtocolVersion: types.ProtocolVersion,
-		ServerInfo:      s.info,
+		ProtocolVersion: "2024-11-05",
 		Capabilities: types.ServerCapabilities{
-			Tools: &types.ToolCapability{
-				List: true,
-				Call: true,
+			Tools: &types.ToolsCapability{
+				ListChanged: true,
 			},
+			Resources: &types.ResourcesCapability{
+				Subscribe:   false,
+				ListChanged: false,
+			},
+			Prompts: &types.PromptsCapability{
+				ListChanged: false,
+			},
+		},
+		ServerInfo: types.ServerInfo{
+			Name:    s.info.Name,
+			Version: s.info.Version,
 		},
 	}
 
-	if params.ClientInfo != nil {
-		s.logger.Printf("client connected: %s %s", params.ClientInfo.Name, params.ClientInfo.Version)
+	return &types.Response{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result:  result,
 	}
-
-	return result, nil
 }
 
-func (s *Server) handlePing(ctx context.Context, req types.Request) (any, *types.Error) {
-	_ = ctx
+// handleListTools 处理工具列表请求
+func (s *Server) handleListTools(req *types.Request) *types.Response {
+	// 列出工具，但不输出日志避免干扰 JSON-RPC
 
-	var params types.PingParams
-	if len(req.Params) > 0 {
-		if err := types.DecodeParams(req.Params, &params); err != nil {
-			return nil, types.NewInvalidParamsError(err)
+	var tools []types.ToolDefinition
+	for _, tool := range s.tools {
+		mcpTool := types.ToolDefinition{
+			Name:        tool.GetName(),
+			Description: tool.GetDescription(),
+			InputSchema: tool.GetInputSchema(),
+		}
+		tools = append(tools, mcpTool)
+	}
+
+	result := map[string]interface{}{
+		"tools": tools,
+	}
+
+	return &types.Response{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result:  result,
+	}
+}
+
+func (s *Server) handleCallTool(req *types.Request) *types.Response {
+	var params types.CallToolParams
+	if req.Params != nil {
+		paramBytes, err := json.Marshal(req.Params)
+		if err != nil {
+			return s.errorResponse(req, -32602, "Invalid params: "+err.Error())
+		}
+		if err := json.Unmarshal(paramBytes, &params); err != nil {
+			return s.errorResponse(req, -32602, "Invalid params: "+err.Error())
 		}
 	}
 
-	return types.PingResult{Status: "ok", Message: params.Message}, nil
-}
+	// 调用工具，但不输出日志避免干扰 JSON-RPC
 
-func (s *Server) handleListTools(ctx context.Context, req types.Request) (any, *types.Error) {
-	_ = ctx
-	_ = req
-
-	toolDefinitions := make([]tools.ToolDefinition, 0, len(s.toolOrder))
-	for _, name := range s.toolOrder {
-		registration := s.tools[name]
-		toolDefinitions = append(toolDefinitions, registration.Definition)
+	// 查找工具
+	tool, exists := s.tools[params.Name]
+	if !exists {
+		return s.errorResponse(req, -32602, "Unknown tool: "+params.Name)
 	}
 
-	return tools.ListToolsResult{Tools: toolDefinitions}, nil
-}
-
-func (s *Server) handleCallTool(ctx context.Context, req types.Request) (any, *types.Error) {
-	var params types.CallToolParams
-	if len(req.Params) == 0 {
-		return nil, types.NewInvalidParamsError(errors.New("missing params"))
-	}
-	if err := types.DecodeParams(req.Params, &params); err != nil {
-		return nil, types.NewInvalidParamsError(err)
-	}
-	if params.Name == "" {
-		return nil, types.NewInvalidParamsError(errors.New("missing tool name"))
-	}
-
-	registration, ok := s.tools[params.Name]
-	if !ok {
-		return nil, types.NewErrorf(types.CodeApplicationError, "tool %q not registered", params.Name)
-	}
-
-	result, err := registration.Handler(ctx, params.Arguments)
+	// 执行工具
+	result, err := tool.Execute(params.Arguments)
 	if err != nil {
-		return nil, types.NewToolError(err)
+		// 工具执行失败，但不输出日志避免干扰 JSON-RPC
+		return &types.Response{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: types.CallToolResult{
+				Content: []types.ContentItem{
+					{Type: "text", Text: "❌ " + err.Error()},
+				},
+				IsError: true,
+			},
+		}
 	}
 
-	if result == nil {
-		return types.CallToolResult{Content: []types.ContentItem{}}, nil
-	}
+	// 工具执行成功，但不输出日志避免干扰 JSON-RPC
 
-	return result, nil
+	return &types.Response{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result: types.CallToolResult{
+			Content: []types.ContentItem{
+				{Type: "text", Text: result},
+			},
+		},
+	}
+}
+
+// errorResponse 创建错误响应
+func (s *Server) errorResponse(req *types.Request, code int, message string) *types.Response {
+	// 创建错误响应，但不输出日志避免干扰 JSON-RPC
+
+	return &types.Response{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Error: &types.Error{
+			Code:    code,
+			Message: message,
+		},
+	}
 }

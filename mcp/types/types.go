@@ -16,18 +16,18 @@ const (
 
 // Request models a JSON-RPC request or notification envelope.
 type Request struct {
-	JSONRPC string           `json:"jsonrpc"`
-	ID      *json.RawMessage `json:"id,omitempty"`
-	Method  string           `json:"method"`
-	Params  json.RawMessage  `json:"params,omitempty"`
+	JSONRPC string      `json:"jsonrpc"`
+	ID      interface{} `json:"id,omitempty"`
+	Method  string      `json:"method"`
+	Params  interface{} `json:"params,omitempty"`
 }
 
 // Response models a JSON-RPC response envelope.
 type Response struct {
-	JSONRPC string           `json:"jsonrpc"`
-	ID      *json.RawMessage `json:"id,omitempty"`
-	Result  any              `json:"result,omitempty"`
-	Error   *Error           `json:"error,omitempty"`
+	JSONRPC string      `json:"jsonrpc"`
+	ID      interface{} `json:"id,omitempty"`
+	Result  interface{} `json:"result,omitempty"`
+	Error   *Error      `json:"error,omitempty"`
 }
 
 // Error represents a JSON-RPC error object.
@@ -51,16 +51,25 @@ const (
 
 // InitializeParams represents the payload for the initialize request defined by MCP.
 type InitializeParams struct {
-	ClientInfo      *ClientInfo       `json:"clientInfo,omitempty"`
-	ProtocolVersion string            `json:"protocolVersion"`
-	Capabilities    json.RawMessage   `json:"capabilities,omitempty"`
-	Metadata        map[string]string `json:"metadata,omitempty"`
+	ProtocolVersion string             `json:"protocolVersion"`
+	Capabilities    ClientCapabilities `json:"capabilities"`
+	ClientInfo      ClientInfo         `json:"clientInfo"`
 }
 
-// ClientInfo describes the connecting client.
+type ClientCapabilities struct {
+	Roots    *RootsCapability    `json:"roots,omitempty"`
+	Sampling *SamplingCapability `json:"sampling,omitempty"`
+}
+
+type RootsCapability struct {
+	ListChanged bool `json:"listChanged,omitempty"`
+}
+
+type SamplingCapability struct{}
+
 type ClientInfo struct {
 	Name    string `json:"name"`
-	Version string `json:"version,omitempty"`
+	Version string `json:"version"`
 }
 
 // InitializeResult is returned when the server handles an initialize request.
@@ -68,18 +77,32 @@ type InitializeResult struct {
 	ProtocolVersion string             `json:"protocolVersion"`
 	Capabilities    ServerCapabilities `json:"capabilities"`
 	ServerInfo      ServerInfo         `json:"serverInfo"`
-	Metadata        map[string]string  `json:"metadata,omitempty"`
+}
+
+// ServerCapabilities advertises the MCP capabilities provided by this server.
+type ServerCapabilities struct {
+	Tools     *ToolsCapability     `json:"tools,omitempty"`
+	Resources *ResourcesCapability `json:"resources,omitempty"`
+	Prompts   *PromptsCapability   `json:"prompts,omitempty"`
+}
+
+type ToolsCapability struct {
+	ListChanged bool `json:"listChanged,omitempty"`
+}
+
+type ResourcesCapability struct {
+	Subscribe   bool `json:"subscribe,omitempty"`
+	ListChanged bool `json:"listChanged,omitempty"`
+}
+
+type PromptsCapability struct {
+	ListChanged bool `json:"listChanged,omitempty"`
 }
 
 // ServerInfo announces information about this MCP server.
 type ServerInfo struct {
 	Name    string `json:"name"`
-	Version string `json:"version,omitempty"`
-}
-
-// ServerCapabilities advertises the MCP capabilities provided by this server.
-type ServerCapabilities struct {
-	Tools *ToolCapability `json:"tools,omitempty"`
+	Version string `json:"version"`
 }
 
 // ToolCapability signals which tool related methods are supported.
@@ -101,19 +124,20 @@ type PingResult struct {
 
 // CallToolParams is the payload for the tools/call method.
 type CallToolParams struct {
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments,omitempty"`
+	Name      string                 `json:"name"`
+	Arguments map[string]interface{} `json:"arguments,omitempty"`
 }
 
 // CallToolResult wraps the response returned by a tool invocation.
 type CallToolResult struct {
 	Content []ContentItem `json:"content"`
+	IsError bool          `json:"isError,omitempty"`
 }
 
 // ContentItem is a minimal text-based MCP content payload.
 type ContentItem struct {
 	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Text string `json:"text"`
 }
 
 // CloneID 拷贝 JSON-RPC 请求或响应的 ID，避免共享底层切片。
@@ -161,3 +185,34 @@ func NewToolError(err error) *Error {
 	}
 	return &Error{Code: CodeToolError, Message: err.Error()}
 }
+
+type ToolDefinition struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description,omitempty"`
+	InputSchema InputSchema `json:"inputSchema"`
+}
+
+type InputSchema struct {
+	Type       string              `json:"type"`
+	Properties map[string]Property `json:"properties,omitempty"`
+	Required   []string            `json:"required,omitempty"`
+}
+
+type Property struct {
+	Type        string   `json:"type"`
+	Description string   `json:"description,omitempty"`
+	Enum        []string `json:"enum,omitempty"`
+	Default     string   `json:"default,omitempty"`
+}
+
+// MCP 方法常量
+const (
+	MethodInitialize              = "initialize"
+	MethodInitialized             = "initialized"
+	MethodNotificationInitialized = "notifications/initialized"
+	MethodListTools               = "tools/list"
+	MethodCallTool                = "tools/call"
+	MethodListPrompts             = "prompts/list"
+	MethodListResources           = "resources/list"
+	MethodReadResource            = "resources/read"
+)
