@@ -2,7 +2,6 @@ package router
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"go-mcp/mcp/tools"
@@ -11,17 +10,12 @@ import (
 	"os"
 )
 
-// MethodHandler processes an incoming JSON-RPC request and returns a result or an error.
-type MethodHandler func(ctx context.Context, req types.Request) (any, *types.Error)
-
 // Server implements a stdio-based MCP server.
 type Server struct {
 	input  io.Reader
 	output io.Writer
 
-	handlers  map[string]MethodHandler
-	tools     map[string]types.MonitorTool
-	toolOrder []string
+	tools map[string]types.MonitorTool
 
 	info types.ServerInfo
 
@@ -31,26 +25,12 @@ type Server struct {
 // Option customises server behavior during construction.
 type Option func(*Server)
 
-// WithServerInfo overrides the default server info advertised during initialization.
-func WithServerInfo(name, version string) Option {
-	return func(s *Server) {
-		if name != "" {
-			s.info.Name = name
-		}
-		if version != "" {
-			s.info.Version = version
-		}
-	}
-}
-
 // NewServer 构建一个基于 stdio 的 MCP 服务器，并在初始化阶段绑定所有已注册工具。
 func NewServer() *Server {
 	return &Server{
-		input:     os.Stdin,
-		output:    os.Stdout,
-		handlers:  map[string]MethodHandler{},
-		tools:     make(map[string]types.MonitorTool),
-		toolOrder: make([]string, 0),
+		input:  os.Stdin,
+		output: os.Stdout,
+		tools:  make(map[string]types.MonitorTool),
 		info: types.ServerInfo{
 			Name:    "go-mcp-server",
 			Version: "dev",
@@ -82,9 +62,19 @@ func (s *Server) InitializeTools() error {
 
 	// 创建工具实例
 	cpuTool := tools.NewCPUTool()
+	diskTool := tools.NewDiskTool()
+	memoryTool := tools.NewMemoryTool()
+	networkTool := tools.NewNetworkTool()
+	processTool := tools.NewProcessTool()
+	systemTool := tools.NewSystemTool()
 
 	// 注册工具
 	s.tools[cpuTool.GetName()] = cpuTool
+	s.tools[diskTool.GetName()] = diskTool
+	s.tools[memoryTool.GetName()] = memoryTool
+	s.tools[networkTool.GetName()] = networkTool
+	s.tools[processTool.GetName()] = processTool
+	s.tools[systemTool.GetName()] = systemTool
 
 	// 工具初始化完成，但不输出日志避免干扰 JSON-RPC
 
@@ -209,18 +199,18 @@ func (s *Server) handleInitialize(req *types.Request) *types.Response {
 func (s *Server) handleListTools(req *types.Request) *types.Response {
 	// 列出工具，但不输出日志避免干扰 JSON-RPC
 
-	var tools []types.ToolDefinition
+	var toolDefinitions []types.ToolDefinition
 	for _, tool := range s.tools {
 		mcpTool := types.ToolDefinition{
 			Name:        tool.GetName(),
 			Description: tool.GetDescription(),
 			InputSchema: tool.GetInputSchema(),
 		}
-		tools = append(tools, mcpTool)
+		toolDefinitions = append(toolDefinitions, mcpTool)
 	}
 
 	result := map[string]interface{}{
-		"tools": tools,
+		"tools": toolDefinitions,
 	}
 
 	return &types.Response{
