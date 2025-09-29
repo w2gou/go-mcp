@@ -94,7 +94,7 @@ func (s *Server) dispatch() error {
 		if err := json.Unmarshal([]byte(line), &req); err != nil {
 			// 解析失败，但不输出日志到避免干扰 JSON-RPC
 			// 发送解析错误响应（只有在有ID的情况下）
-			var rawMessage map[string]interface{}
+			var rawMessage map[string]json.RawMessage
 			json.Unmarshal([]byte(line), &rawMessage)
 			if id, hasID := rawMessage["id"]; hasID {
 				errorResp := &types.Response{
@@ -188,10 +188,16 @@ func (s *Server) handleInitialize(req *types.Request) *types.Response {
 		},
 	}
 
+	// 先编码成 JSON
+	resultJson, err := json.Marshal(result)
+	if err != nil {
+		panic(err)
+	}
+
 	return &types.Response{
 		JSONRPC: "2.0",
 		ID:      req.ID,
-		Result:  result,
+		Result:  resultJson,
 	}
 }
 
@@ -213,10 +219,16 @@ func (s *Server) handleListTools(req *types.Request) *types.Response {
 		"tools": toolDefinitions,
 	}
 
+	// 先编码成 JSON
+	resultJson, err := json.Marshal(result)
+	if err != nil {
+		panic(err)
+	}
+
 	return &types.Response{
 		JSONRPC: "2.0",
 		ID:      req.ID,
-		Result:  result,
+		Result:  resultJson,
 	}
 }
 
@@ -244,28 +256,45 @@ func (s *Server) handleCallTool(req *types.Request) *types.Response {
 	result, err := tool.Execute(params.Arguments)
 	if err != nil {
 		// 工具执行失败，但不输出日志避免干扰 JSON-RPC
+
+		result := types.CallToolResult{
+			Content: []types.ContentItem{
+				{Type: "text", Text: "❌ " + err.Error()},
+			},
+			IsError: true,
+		}
+
+		// 先编码成 JSON
+		resultJson, err := json.Marshal(result)
+		if err != nil {
+			panic(err)
+		}
+
 		return &types.Response{
 			JSONRPC: "2.0",
 			ID:      req.ID,
-			Result: types.CallToolResult{
-				Content: []types.ContentItem{
-					{Type: "text", Text: "❌ " + err.Error()},
-				},
-				IsError: true,
-			},
+			Result:  resultJson,
 		}
 	}
 
 	// 工具执行成功，但不输出日志避免干扰 JSON-RPC
 
+	callToolResult := types.CallToolResult{
+		Content: []types.ContentItem{
+			{Type: "text", Text: result},
+		},
+	}
+
+	// 先编码成 JSON
+	resultJson, err := json.Marshal(callToolResult)
+	if err != nil {
+		panic(err)
+	}
+
 	return &types.Response{
 		JSONRPC: "2.0",
 		ID:      req.ID,
-		Result: types.CallToolResult{
-			Content: []types.ContentItem{
-				{Type: "text", Text: result},
-			},
-		},
+		Result:  resultJson,
 	}
 }
 
